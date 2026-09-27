@@ -1,0 +1,2 @@
+# Standard library only - zero external dependencies required
+urllib3>=2.0.0

@@ -1,0 +1,10 @@
+.env
+conversations.json
+__pycache__/
+*.pyc
+*.log
+test_*.py
+debug_*.py
+inspect_*.py
+check_*.py
+run_*.py
