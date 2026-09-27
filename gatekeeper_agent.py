@@ -389,8 +389,6 @@ def send_email_reply(to_email, subject, body_text):
         return False
 
 
-MACRODROID_SMS_WEBHOOK = CONFIG.get("MACRODROID_SMS_WEBHOOK")
-
 
 def send_sms_via_macrodroid(number, message):
     if not MACRODROID_SMS_WEBHOOK:
