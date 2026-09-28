@@ -283,23 +283,43 @@ def extract_json_safe(text):
         cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
     elif "```" in cleaned:
         cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+
+    # 1. Direct JSON parse
     try:
-        return json.loads(cleaned)
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data
     except Exception:
         pass
+
+    # 2. Slice outermost { ... }
     s = cleaned.find('{')
     e = cleaned.rfind('}')
     if s != -1 and e != -1 and e > s:
         try:
-            return json.loads(cleaned[s:e+1])
+            data = json.loads(cleaned[s:e+1])
+            if isinstance(data, dict):
+                return data
         except Exception:
             pass
-    m = re.search(r'\{[^{}]*"summary"[^{}]*"proposed_reply"[^{}]*\}', cleaned, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            pass
+
+    # 3. Regex for both key orders
+    m1 = re.search(r'\{[^{}]*"summary"\s*:\s*"([^"]+)"[^{}]*"proposed_reply"\s*:\s*"([^"]+)"[^{}]*\}', cleaned, re.DOTALL)
+    if m1:
+        return {"summary": m1.group(1), "proposed_reply": m1.group(2)}
+
+    m2 = re.search(r'\{[^{}]*"proposed_reply"\s*:\s*"([^"]+)"[^{}]*"summary"\s*:\s*"([^"]+)"[^{}]*\}', cleaned, re.DOTALL)
+    if m2:
+        return {"summary": m2.group(2), "proposed_reply": m2.group(1)}
+
+    # 4. Fallback line-by-line match
+    r_match = re.search(r'(?:proposed_reply|reply)\s*["\':=]+\s*["\']?([^"\'\n\r]+)', cleaned, re.IGNORECASE)
+    s_match = re.search(r'(?:summary)\s*["\':=]+\s*["\']?([^"\'\n\r]+)', cleaned, re.IGNORECASE)
+    if r_match:
+        r_val = r_match.group(1).strip().strip('",}')
+        s_val = s_match.group(1).strip().strip('",}') if s_match else "Incoming communication"
+        return {"summary": s_val, "proposed_reply": r_val}
+
     return None
 
 def analyze_with_gemini(channel, sender, content, contact_id=None):
@@ -327,7 +347,7 @@ RULES:
 
 Return STRICT JSON: {{"summary": "1-sentence summary", "proposed_reply": "exact reply to send"}}"""
 
-    models_to_try = ["gemma-4-26b-a4b-it", "gemini-3.5-flash-lite", "gemini-flash-latest"]
+    models_to_try = ["gemma-4-26b-a4b-it", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-latest"]
 
     for model in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
@@ -351,9 +371,10 @@ Return STRICT JSON: {{"summary": "1-sentence summary", "proposed_reply": "exact 
                     continue
                 parts = candidates[0].get("content", {}).get("parts", [])
                 raw_text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
-                if not raw_text:
-                    raw_text = "".join(p.get("text", "") for p in parts).strip()
                 data = extract_json_safe(raw_text)
+                if not data:
+                    all_text = "".join(p.get("text", "") for p in parts).strip()
+                    data = extract_json_safe(all_text)
                 if data and "summary" in data and "proposed_reply" in data:
                     summary = str(data["summary"]).strip()
                     proposed_reply = str(data["proposed_reply"]).strip()
@@ -362,7 +383,13 @@ Return STRICT JSON: {{"summary": "1-sentence summary", "proposed_reply": "exact 
             print(f"[Gemini Warning] Model '{model}' failed: {e}", file=sys.stderr)
             continue
 
-    return f"Received message from {sender}.", f"Hi {sender}, received your message and will get back to you shortly."
+    # Channel-aware natural fallback (Never sounds like a corporate bot)
+    if channel.lower() == "whatsapp":
+        return f"Message from {sender}", "ha thoda busy hu abhi, thodi der me message krta hu"
+    elif "call" in channel.lower():
+        return f"Call from {sender}", "Busy right now, will call back soon."
+    else:
+        return f"Email from {sender}", f"Hi {sender}, thank you for reaching out. I have received your email and will follow up shortly."
 
 
 
