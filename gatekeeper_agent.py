@@ -273,6 +273,35 @@ def send_autonomous_chat_update(sender, incoming_text, agent_reply, summary):
 # ==========================================
 # 2. Gemini AI Analysis Engine (Hinglish & Multi-Turn Tone Matching)
 # ==========================================
+import re
+
+def extract_json_safe(text):
+    if not text:
+        return None
+    cleaned = text.strip()
+    if "```json" in cleaned:
+        cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in cleaned:
+        cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+    s = cleaned.find('{')
+    e = cleaned.rfind('}')
+    if s != -1 and e != -1 and e > s:
+        try:
+            return json.loads(cleaned[s:e+1])
+        except Exception:
+            pass
+    m = re.search(r'\{[^{}]*"summary"[^{}]*"proposed_reply"[^{}]*\}', cleaned, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    return None
+
 def analyze_with_gemini(channel, sender, content, contact_id=None):
     cid = clean_contact_id(contact_id or sender)
     history_str = get_history_summary(cid)
@@ -281,47 +310,24 @@ def analyze_with_gemini(channel, sender, content, contact_id=None):
     if history_str:
         history_context = f"\nRecent Conversation History with this contact:\n{history_str}\n"
 
-    prompt = f"""You are Eashan Singh texting from your own phone on {channel}.
-The other person thinks they are chatting directly with Eashan. You must sound 100% like a real young Indian guy typing casually on his smartphone keyboard, NOT like an AI bot!
+    prompt = f"""You are Eashan Singh texting casually on your own phone ({channel}).
+The other person thinks they are chatting directly with Eashan. Sound like a real young Indian guy on his phone, NOT an AI bot!
 
-Channel: {channel}
 Sender: {sender}
-Latest Message: "{content}"
+Message: "{content}"
 {history_context}
-INSTRUCTIONS:
-1. summary: A crisp 1-sentence breakdown of what {sender} is saying, asking, or feeling.
-2. proposed_reply: Draft the exact text message Eashan would type.
 
-STRICT HUMAN TEXTING RULES (CRUCIAL TO AVOID SOUNDING LIKE AN AI):
-1. CONDITIONAL SLANG MATCHING (MIRROR ONLY IF SENDER USED IT):
-   - IF AND ONLY IF the sender used informal slang, banter, or gaali (e.g., 'abe saale', 'chutiye', 'laude', 'kya be', 'bakwaas mat kar'):
-     * You MUST match their slang level and banter back in the same authentic slang style (e.g., 'abe saale tu chup kar raste me hu', 'kya be apna dekh pehle', 'chup kar na bhai 5 min me aa raha hu').
-   - IF THE SENDER DID NOT USE SLANG (e.g., normal casual message, sweet message, or formal message):
-     * Strictly DO NOT use any slang, abuses, or 'abe'. Keep it completely clean, friendly, and natural.
-2. NATURAL OPENERS (NO UNNECESSARY 'ABE'):
-   - Do NOT start normal messages with 'Abe' unless the contact specifically said 'Abe' or used slang first.
-   - Start naturally: 'ha', 'ruk na', 'arre', 'bhai', 'haan bol', 'kya scene', or directly answer.
-3. STRICTLY MINIMAL EMOJIS:
-   - Do NOT put an emoji in every sentence! Most real WhatsApp texts have ZERO emojis.
-   - Only use an emoji if the sender used one first or in rare fitting moments. No emoji at the end of every sentence.
-4. LOWERCASE & CASUAL REAL CHAT STYLE (NOT FORMAL TEXTBOOK HINDI):
-   - For casual WhatsApp chat, do NOT use formal textbook sentence capitalization.
-   - Start casually in lowercase or natural chat case (e.g., 'ha ruk na raste me hu', 'bhai kya scene hai', 'nhi yaar aaj thoda kaam hai').
-   - Use authentic Indian texting abbreviations: 'ha', 'nhi', 'krta hu', 'ruk na', 'thik hai', 'kya scene', 'kaha hai', 'chalega'.
-   - Avoid textbook punctuation (no formal periods '.' or '!' after every tiny phrase).
-5. EMOTIONAL / CARING (IF WITH GIRLFRIEND/CLOSE ONES):
-   - Sound warm, real, and natural, not poetic or robotic: 'ha abhi khaya yaar, tune khaya kuch?', 'miss you too kab mil rahe bata'.
-6. FORMAL / PROFESSIONAL (CLIENTS, RECRUITERS, EMAILS):
-   - If the channel is Email or the message is in formal English from a client/recruiter/professor:
-   - Reply in polite, polished professional English (e.g., 'Hi, thank you for reaching out. Eashan is currently in a meeting, but I will make sure he reviews this and gets back to you shortly.').
-7. SAFETY GUARDRAIL (CRITICAL):
-   - Never confirm bookings, payments, or money. Tell them to hold: 'ruk details bhej pehle check krta hu fir krte hai'.
-8. LENGTH:
-   - 1 short, natural chat line (max 10-15 words).
+RULES:
+1. CONDITIONAL SLANG: If sender used slang/banter, mirror their slang casually. If NO slang, keep it clean and friendly.
+2. NATURAL TEXTING: Start naturally (no repetitive 'Abe'). Use lowercase ('ha', 'nhi', 'ruk na', 'kya scene'). Minimal/no emojis.
+3. CARING/WARM: If girlfriend or close friend, sound warm and natural ('ha abhi khaya yaar, tune khaya?').
+4. FORMAL: If formal English or corporate/client, reply in polite professional English.
+5. SAFETY: Never agree to bookings or money ('ruk details bhej pehle check krta hu').
+6. LENGTH: 1 short, natural chat line (max 10-12 words).
 
-Return STRICT JSON with keys "summary" and "proposed_reply". Do NOT use markdown code fences."""
+Return STRICT JSON: {{"summary": "1-sentence summary", "proposed_reply": "exact reply to send"}}"""
 
-    models_to_try = ["gemini-3.5-flash-lite", "gemma-4-26b-a4b-it", "gemini-flash-latest"]
+    models_to_try = ["gemma-4-26b-a4b-it", "gemini-3.5-flash-lite", "gemini-flash-latest"]
 
     for model in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
@@ -338,27 +344,20 @@ Return STRICT JSON with keys "summary" and "proposed_reply". Do NOT use markdown
                     "User-Agent": "OmnichannelAgent/1.0"
                 }
             )
-            with urllib.request.urlopen(req, timeout=45) as response:
+            with urllib.request.urlopen(req, timeout=30) as response:
                 res_data = json.loads(response.read().decode("utf-8"))
                 candidates = res_data.get("candidates", [])
                 if not candidates:
                     continue
                 parts = candidates[0].get("content", {}).get("parts", [])
-                raw_text = ""
-                for part in parts:
-                    if "text" in part:
-                        raw_text += part["text"]
-                raw_text = raw_text.strip()
+                raw_text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
                 if not raw_text:
-                    continue
-                if raw_text.startswith("```"):
-                    raw_text = raw_text.split("\n", 1)[1].rsplit("\n", 1)[0].strip()
-                    if raw_text.startswith("json"):
-                        raw_text = raw_text[4:].strip()
-                data = json.loads(raw_text)
-                summary = data.get("summary", "New communication received.").strip()
-                proposed_reply = data.get("proposed_reply", "Received, will follow up soon.").strip()
-                return summary, proposed_reply
+                    raw_text = "".join(p.get("text", "") for p in parts).strip()
+                data = extract_json_safe(raw_text)
+                if data and "summary" in data and "proposed_reply" in data:
+                    summary = str(data["summary"]).strip()
+                    proposed_reply = str(data["proposed_reply"]).strip()
+                    return summary, proposed_reply
         except Exception as e:
             print(f"[Gemini Warning] Model '{model}' failed: {e}", file=sys.stderr)
             continue
