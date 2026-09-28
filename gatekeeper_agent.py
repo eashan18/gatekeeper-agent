@@ -584,13 +584,14 @@ def telegram_polling_loop():
                                     set_thread_delegation(contact_id, True)
                                     add_message_to_history(contact_id, contact_id, "agent", draft)
                                     record_sent_reply(draft)
-                                    sent = send_whatsapp_reply_via_macrodroid(draft, sender=contact_id)
-                                    execution_status = f"WhatsApp reply sent: \"{draft}\"" if sent else f"Draft recorded: \"{draft}\""
+
+                                    # Instant non-blocking dispatch to phone via MacroDroid
+                                    threading.Thread(target=send_whatsapp_reply_via_macrodroid, args=(draft, contact_id), daemon=True).start()
 
                                     updated_text = (
                                         f"{safe_base}\n\n"
                                         "━━━━━━━━━━━━━━━━━━━\n"
-                                        f"🤖 <b>Status:</b> Agent Handled! ({html.escape(execution_status)})\n"
+                                        f"🤖 <b>Status:</b> Agent Handled! (⚡ WhatsApp reply dispatched: \"{html.escape(draft)}\")\n"
                                         f"⚡ <i>Agent will autonomously continue this conversation in Hinglish/English.</i>"
                                     )
                                     telegram_request("editMessageText", {
@@ -739,6 +740,82 @@ def extract_val(data, keys, default=""):
     return default
 
 
+# ==========================================
+# Rapid-Fire Debounce & Message Aggregation Buffer
+# ==========================================
+DEBOUNCE_BUFFER = {}  # { cid: { "sender": sender, "messages": [m1, m2...], "timer": Timer } }
+DEBOUNCE_LOCK = threading.Lock()
+DEBOUNCE_WINDOW_SECONDS = 3.0
+
+def process_batched_whatsapp(cid):
+    with DEBOUNCE_LOCK:
+        entry = DEBOUNCE_BUFFER.pop(cid, None)
+    if not entry or not entry["messages"]:
+        return
+
+    sender = entry["sender"]
+    messages = entry["messages"]
+
+    if len(messages) == 1:
+        combined_message = messages[0]
+    else:
+        combined_message = " \n ".join(messages)
+
+    print(f"[Debounce Process] Processing {len(messages)} accumulated message(s) from '{sender}': '{combined_message}'")
+
+    for m in messages:
+        add_message_to_history(sender, sender, "contact", m)
+
+    # 1. Check if thread is delegated to agent
+    if is_thread_delegated(sender):
+        with TRACK_LOCK:
+            latest_sender = LAST_WHATSAPP_NOTIFICATION_SENDER
+            latest_time = LAST_WHATSAPP_NOTIFICATION_TIME
+
+        # Safety: If another contact messaged within the last 15s, pause autonomous mode to prevent cross-chat mixing on phone!
+        if latest_sender and clean_contact_id(latest_sender) != clean_contact_id(sender) and (time.time() - latest_time) < 15:
+            print(f"[Autonomous Safety] Multiple simultaneous contacts ('{sender}' & '{latest_sender}')! Pausing autonomous reply and asking user on Telegram.")
+            summary, reply_draft = analyze_with_gemini("WhatsApp", sender, combined_message, contact_id=sender)
+            event_id = f"wh_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}"
+            with PENDING_LOCK:
+                PENDING_EVENTS[event_id] = {
+                    "type": "WhatsApp",
+                    "sender": sender,
+                    "content": combined_message,
+                    "summary": f"⚠️ Simultaneous Chats: {summary}",
+                    "reply_draft": reply_draft,
+                    "timestamp": time.time()
+                }
+            send_decision_prompt(event_id, "WhatsApp", sender, combined_message, f"⚠️ Multiple active chats ({sender} & {latest_sender}). Confirm reply:", reply_draft)
+            return
+
+        print(f"[Autonomous Mode] Thread with '{sender}' is DELEGATED to Agent! Answering contextually...")
+        summary, reply_draft = analyze_with_gemini("WhatsApp", sender, combined_message, contact_id=sender)
+        add_message_to_history(sender, sender, "agent", reply_draft)
+        increment_autonomous_turn(sender)
+        record_sent_reply(reply_draft)
+        threading.Thread(target=send_whatsapp_reply_via_macrodroid, args=(reply_draft, sender), daemon=True).start()
+        send_autonomous_chat_update(sender, combined_message, reply_draft, summary)
+        return
+
+    # 2. Standard HITL Prompt (One consolidated card on Telegram!)
+    print(f"[HITL Prompt] Consolidated prompt for '{sender}'. Asking on Telegram...")
+    event_id = f"wh_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}"
+    summary, reply_draft = analyze_with_gemini("WhatsApp", sender, combined_message, contact_id=sender)
+
+    with PENDING_LOCK:
+        PENDING_EVENTS[event_id] = {
+            "type": "WhatsApp",
+            "sender": sender,
+            "content": combined_message,
+            "summary": summary,
+            "reply_draft": reply_draft,
+            "timestamp": time.time()
+        }
+
+    send_decision_prompt(event_id, "WhatsApp", sender, combined_message, summary, reply_draft)
+
+
 def handle_incoming_whatsapp(sender, message):
     if sender.lower() in ["you", "whatsapp", "checking for new messages", "backup in progress", "web is currently active", "whatsapp web", "me"]:
         print(f"[WhatsApp Webhook] Ignored system/self notification from '{sender}'")
@@ -753,43 +830,39 @@ def handle_incoming_whatsapp(sender, message):
         print(f"[WhatsApp Warning] Message text empty or unconverted tag: '{message}'. Ensure MacroDroid uses [not_text].")
         message = "New WhatsApp notification received."
 
-    # Update active notification tracker so server knows who is currently on phone screen
+    # Update active notification tracker
     with TRACK_LOCK:
         global LAST_WHATSAPP_NOTIFICATION_SENDER, LAST_WHATSAPP_NOTIFICATION_TIME
         LAST_WHATSAPP_NOTIFICATION_SENDER = str(sender).strip()
         LAST_WHATSAPP_NOTIFICATION_TIME = time.time()
 
-    # 1. Record incoming message in conversation history (atomic under CONV_LOCK)
-    add_message_to_history(sender, sender, "contact", message)
+    cid = clean_contact_id(sender)
 
-    # 2. Check if thread is currently delegated to agent
-    if is_thread_delegated(sender):
-        print(f"[Autonomous Mode] Thread with '{sender}' is DELEGATED to Agent! Answering contextually...")
-        summary, reply_draft = analyze_with_gemini("WhatsApp", sender, message, contact_id=sender)
-        add_message_to_history(sender, sender, "agent", reply_draft)
-        increment_autonomous_turn(sender)
-        record_sent_reply(reply_draft)
-        send_whatsapp_reply_via_macrodroid(reply_draft, sender=sender)
-        send_autonomous_chat_update(sender, message, reply_draft, summary)
-        return "Autonomous reply dispatched and forwarded to Telegram"
+    # Accumulate into debounce buffer to handle rapid-fire messages (e.g. 'bhai', 'sun', 'kal gym...')
+    with DEBOUNCE_LOCK:
+        if cid in DEBOUNCE_BUFFER:
+            entry = DEBOUNCE_BUFFER[cid]
+            if entry.get("timer"):
+                try:
+                    entry["timer"].cancel()
+                except Exception:
+                    pass
+            entry["messages"].append(message)
+            print(f"[Debounce] Accumulated #{len(entry['messages'])} from '{sender}': '{message}'")
+        else:
+            entry = {
+                "sender": sender,
+                "messages": [message],
+                "timer": None
+            }
+            DEBOUNCE_BUFFER[cid] = entry
+            print(f"[Debounce] Started buffer for '{sender}': '{message}'")
 
-    # 3. Request HITL permission
-    print(f"[HITL Prompt] Thread with '{sender}' requires permission. Asking on Telegram...")
-    event_id = f"wh_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}"
-    summary, reply_draft = analyze_with_gemini("WhatsApp", sender, message, contact_id=sender)
+        timer = threading.Timer(DEBOUNCE_WINDOW_SECONDS, process_batched_whatsapp, args=(cid,))
+        entry["timer"] = timer
+        timer.start()
 
-    with PENDING_LOCK:
-        PENDING_EVENTS[event_id] = {
-            "type": "WhatsApp",
-            "sender": sender,
-            "content": message,
-            "summary": summary,
-            "reply_draft": reply_draft,
-            "timestamp": time.time()
-        }
-
-    send_decision_prompt(event_id, "WhatsApp", sender, message, summary, reply_draft)
-    return "WhatsApp received and forwarded to Telegram"
+    return "WhatsApp received and queued for debounce batching"
 
 
 def handle_incoming_call(caller_name, caller_number, call_type):
