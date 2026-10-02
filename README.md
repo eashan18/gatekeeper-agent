@@ -1,5 +1,10 @@
 # 🛡️ OmniGate: Autonomous Omnichannel AI Gatekeeper & HITL Dispatcher
 
+
+https://github.com/user-attachments/assets/deffb3e3-56cf-4cdf-937f-16ed79521063
+
+
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![n8n Workflow](https://img.shields.io/badge/Workflow-n8n-FF6D5A.svg)](https://n8n.io/)
